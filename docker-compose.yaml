@@ -1,0 +1,10 @@
+services:
+  magicbricks-scraper:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      # Optional — on a cloud server, an Indian residential proxy gets past magicbricks.com's Akamai checks.
+      # - MAGICBRICKS_PROXY=http://user:pass@host:port
