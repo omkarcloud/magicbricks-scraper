@@ -33,6 +33,7 @@ fragment, two autosuggest payloads, a trends series + table, four search
 payloads (sale / rent / commercial / empty).
 """
 import html as html_lib
+from collections import Counter
 import json
 import re
 from datetime import datetime, timezone
@@ -40,8 +41,8 @@ from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 
 from magicbricks.refs import (
-    AMENITIES, LANDMARK_CATEGORIES, SITE, agent_link, decode_id, project_link, property_link,
-    rera_link, site_link,
+    AMENITIES, LANDMARK_CATEGORIES, SITE, TRENDS_PROPERTY_TYPES, agent_link, decode_id, project_link,
+    property_link, rera_link, site_link,
 )
 
 _MONTHS = {m: i for i, m in enumerate(
@@ -252,6 +253,42 @@ def _rich_text(value):
     return text if clean(text) else None
 
 
+def _range_display(value):
+    """Project cards join a price range with a comma ('60.6 Lac,1.20 Cr'); the project
+    page writes '10.12 Cr - 12.50 Cr' -> the page's form. 'Call For Price' passes."""
+    text = clean(value)
+    if not isinstance(text, str):
+        return text
+    return re.sub(r"^([\d.]+ (?:Lac|Cr)),\s*([\d.]+ (?:Lac|Cr))$", r"\1 - \2", text)
+
+
+def _month(*values):
+    """Launch / possession dates are months on the site ('Jun, 2021', '20180601',
+    '2022-12-01 00:00:00' - the day is always a filler 01) -> 'YYYY-MM' from the first
+    value that reads as a date."""
+    for value in values:
+        iso = iso_date(value)
+        if isinstance(iso, str) and re.match(r"^\d{4}-\d{2}", iso):
+            return iso[:7]
+    return None
+
+
+def _booking_or_deposit(listing_type, *amounts):
+    """The site keeps a rental's security deposit in the booking-amount field (the rent page
+    labels the same figure 'Security Deposit'; priceBreakUp.securityDeposit repeats it) ->
+    {booking_amount, security_deposit}, the first positive amount going to the one that applies."""
+    amount = next((to_int(a) for a in (positive(x) for x in amounts) if a), None)
+    if listing_type == "rent":
+        return {"booking_amount": None, "security_deposit": amount}
+    return {"booking_amount": amount, "security_deposit": None}
+
+
+def _facing(value):
+    """'North - East' / 'South -West' (the site spaces them either way) -> 'North-East'."""
+    text = clean(value)
+    return re.sub(r"\s*-\s*", "-", text) if isinstance(text, str) else text
+
+
 def _maintenance(amount, frequency):
     """maintenanceCharges + its frequency ('Monthly', 'Quarterly', 'Per sq.
     Unit Monthly', ...) -> {amount, currency, period, is_per_sqft}. The
@@ -278,7 +315,7 @@ def _strip_html(value):
         return None
     text = re.sub(r"</(?:p|div|li|tr|h\d|br)\s*>|<br\s*/?>", " | ", text, flags=re.I)
     text = re.sub(r"</t[dh]\s*>", ": ", text, flags=re.I)
-    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(re.sub(r"<[^>]+>", " ", text))     # &nbsp; / &amp; after the tags go
     text = re.sub(r"\s*\|\s*(\|\s*)+", " | ", text)
     text = re.sub(r"(?:\s*:\s*)+\|", " |", text)
     return clean(text.strip(" |:")) or None
@@ -339,6 +376,11 @@ def _coords(lat, lng, fallback_text=None):
     if lat is None or lng is None:
         lat, lng = _latlng(fallback_text)
     return lat, lng
+
+
+_AMENITY_IDS_BY_NAME = {}
+for _id, _name in AMENITIES.items():
+    _AMENITY_IDS_BY_NAME.setdefault(_name.lower(), []).append(_id)
 
 
 def _amenities(ids_text, *maps):
@@ -423,7 +465,7 @@ def parse_search_row(row):
         "price": {
             **_price(row.get("price"), row.get("priceD"), row.get("sqFtPrice")),
             "maintenance": _maintenance(row.get("maintenanceCharges"), row.get("maintenanceD")),
-            "booking_amount": to_int(positive(row.get("bookingAmtExact"))),
+            **_booking_or_deposit(listing_type, row.get("bookingAmtExact")),
         },
         "bedrooms": to_int(row.get("bedroomD")),
         "bathrooms": to_int(row.get("bathD")),
@@ -435,7 +477,7 @@ def parse_search_row(row):
         "furnishing": _furnishing(row.get("furnishedD")),
         "floor": {"number": to_int(row.get("floorNo")), "total": to_int(row.get("floors")),
                   "display": clean(row.get("floorD"))},
-        "facing": clean(row.get("facingD")),
+        "facing": _facing(row.get("facingD")),
         "overlooking": clean(row.get("amenFacingD")),
         "possession": {"status": clean(row.get("possStatusD")),
                        "available_from": iso_date(row.get("availableFrom")) or clean(row.get("availableFrom"))},
@@ -627,8 +669,8 @@ def _project_view(view, bean):
         "developer": clean(view.get("developerName")),
         "builder_link": site_link(clean(bean.get("builderUrl"))),
         "status": clean(view.get("possessionStatus")),
-        "launched": iso_date(view.get("launchdate")) or clean(view.get("launchdate")),
-        "possession_by": iso_date(view.get("possdate")),
+        "launched": _month(view.get("launchdate")) or clean(view.get("launchdate")),
+        "possession_by": _month(view.get("possdate")),
         "total_units": to_int(view.get("totalUnits")),
         "towers": to_int(view.get("numberOfTowers")),
         "configurations": clean(view.get("projectUnits")) or clean(view.get("bhkConfig")),
@@ -653,16 +695,29 @@ def parse_property(html, property_id=None):
     extra = state.get("searchAdditionalDataBean") or {}
     property_id = clean(bean.get("propertyId")) or clean(info.get("propertyId")) or property_id
     listing_type = _listing_type(bean.get("saleOrRent")) or _listing_type(info.get("category"))
-    amenities = _amenities(list((bean.get("amenityMap") or {}).keys()), bean.get("amenityMap"),
-                           bean.get("propertyAmenities"))
-    # facilitiesDesc names every facility the lister ticked, ids or not
-    # (98 for the Lodha World One listing vs 58 in amenityMap)
+    # amenityMap holds the standard amenities; the luxury ones come as luxAmenities ids
+    # named by luxuryAmenitiesList / luxuryAmenitiesMap (parallel id / name lists)
+    lux_map = bean.get("luxuryAmenitiesMap") or {}
+    lux_ids = lux_map.get("luxAmentiesIdList") or []
+    lux_names = lux_map.get("luxAmentiesNameList") or []
+    lux_pairs = dict(zip(lux_ids, lux_names)) if len(lux_ids) == len(lux_names) else {}
+    lux_list = {a.get("amenRfnum"): a.get("name") for a in (bean.get("luxuryAmenitiesList") or [])
+                if isinstance(a, dict)}
+    amenity_ids = list((bean.get("amenityMap") or {}).keys()) + str(bean.get("luxAmenities") or "").split()
+    amenities = _amenities(amenity_ids, bean.get("amenityMap"), bean.get("propertyAmenities"),
+                           lux_pairs, lux_list)
+    # facilitiesDesc names every facility the lister ticked; a name the id lists missed gets
+    # its id from the site's table when exactly one id carries it, else id None
     known = {(a["name"] or "").lower() for a in amenities}
+    have = {a["id"] for a in amenities}
     for name in str(bean.get("facilitiesDesc") or "").split(","):
         name = clean(name)
         if name and name.lower() not in known:
             known.add(name.lower())
-            amenities.append({"id": None, "name": name})
+            ids = _AMENITY_IDS_BY_NAME.get(name.lower(), [])
+            amenity_id = ids[0] if len(ids) == 1 and ids[0] not in have else None
+            amenities.append({"id": amenity_id, "name": name})
+    breakup = bean.get("priceBreakUp") if isinstance(bean.get("priceBreakUp"), dict) else {}
     lat, lng = positive(bean.get("latitude")), positive(bean.get("longitude"))
     if lat is None or lng is None:
         lat, lng = None, None
@@ -693,12 +748,11 @@ def parse_property(html, property_id=None):
             "emi_per_month": to_int(positive(bean.get("emiPrice"))),
             "maintenance": _maintenance(bean.get("maintenanceCharges"),
                                         bean.get("maintenanceChargesFrequency") or bean.get("maintenanceD")),
-            "security_deposit": to_int(positive(bean.get("securityDeposit"))),
-            "booking_amount": to_int(positive(bean.get("bookingAmountExact")) or positive(bean.get("bookingAmt"))),
+            **_booking_or_deposit(listing_type, bean.get("bookingAmountExact"), bean.get("bookingAmt"),
+                                  bean.get("securityDeposit"), breakup.get("securityDeposit")),
             "brokerage": clean(bean.get("brokerage")),
             "is_negotiable": yn(bean.get("priceNegotiable")),
-            "includes_other_charges": yn((bean.get("priceBreakUp") or {}).get("isOtherThanBasicPrice"))
-                                      if isinstance(bean.get("priceBreakUp"), dict) else None,
+            "includes_other_charges": yn(breakup.get("isOtherThanBasicPrice")) if breakup else None,
         },
         "bedrooms": to_int(bean.get("bedrooms")),
         "bathrooms": to_int(bean.get("bathrooms")),
@@ -713,7 +767,7 @@ def parse_property(html, property_id=None):
         "furnishing": _furnishing(bean.get("furnished")),
         "floor": {"number": to_int(bean.get("floorNumber")), "total": to_int(bean.get("totalFloorNumber")),
                   "units_on_floor": to_int(positive(bean.get("unitCountonFloor")))},
-        "facing": clean(bean.get("facing")),
+        "facing": _facing(bean.get("facing")),
         "overlooking": [clean(x) for x in str(bean.get("amenitiesFacing") or "").split(",") if clean(x)],
         "possession": {"status": clean(bean.get("possessionStatus")) or clean(bean.get("ageofcons")),
                        "available_from": iso_date(bean.get("possdate")) or clean(bean.get("possdate"))},
@@ -780,11 +834,11 @@ def _project_card(row):
         "bedrooms": bhk,
         "price": {"min": int(min_price) if min_price else None, "max": int(max_price) if max_price else None,
                   "currency": "INR" if min_price or max_price else None,
-                  "display": clean(row.get("showPriceRange")) or (f"{clean(row.get('minPriceDesc'))} - {clean(row.get('maxPriceDesc'))}" if clean(row.get("minPriceDesc")) else None),
+                  "display": _range_display(row.get("showPriceRange")) or (f"{clean(row.get('minPriceDesc'))} - {clean(row.get('maxPriceDesc'))}" if clean(row.get("minPriceDesc")) else None),
                   "per_sqft_min": positive(row.get("sqFtPrice")), "per_sqft_max": positive(row.get("sqFtPrMx"))},
         "status": clean(row.get("showReadyToMove")) or clean(row.get("newHomesPossStatus")),
-        "launched": iso_date(row.get("launchDateStr")) or iso_date(row.get("launchDate")),
-        "possession_by": iso_date(row.get("prjPossDate")),
+        "launched": _month(row.get("launchDateStr"), row.get("launchDate")),
+        "possession_by": _month(row.get("prjPossDate")),
         "total_units": to_int(positive(row.get("totalUnits"))),
         "towers": to_int(positive(row.get("noTower"))) or to_int(positive(row.get("towersConstructed"))),
         "area": {"value": positive(row.get("projArea")), "unit": (clean(row.get("projAreaUnitDesc")) or "").lower() or None}
@@ -793,7 +847,7 @@ def _project_card(row):
                      "city": {"name": clean(row.get("ctname"))}, "pincode": clean(row.get("pincode"))},
         "has_rera": yn(row.get("isRera")) if row.get("isRera") is not None else yn(row.get("isReraAvl")),
         "rera_updated_on": iso_date(row.get("reraUpDt")),
-        "rating": positive(row.get("psmavgRt")),
+        "rating": round(positive(row.get("psmavgRt")), 1) if positive(row.get("psmavgRt")) else None,
         "review_count": to_int(positive(row.get("totRev"))),
         "rank": to_int(positive(row.get("psmDRanking"))),
         "tag": clean(row.get("topTag")),
@@ -836,8 +890,10 @@ def _unit_plans(pricing):
         out.append({"configuration": clean(unit.get("bhkType")),
                     "carpet_area": _area(unit.get("carpetAr") or unit.get("carpetArea"), unit.get("coverAreaUnitD")),
                     "floor_plan": clean(unit.get("planImgUrl")),
-                    "rent_price": {"min": clean(unit.get("minRentPriceD")), "max": clean(unit.get("maxRentPriceD"))}
-                                  if clean(unit.get("minRentPriceD")) else None})
+                    # monthly rents of this unit's listings, plain rupee figures ("420000")
+                    "rent_price": {"min": to_int(positive(unit.get("minRentPriceD"))),
+                                   "max": to_int(positive(unit.get("maxRentPriceD")))}
+                                  if positive(unit.get("minRentPriceD")) else None})
     return out
 
 
@@ -874,12 +930,33 @@ def _review(row):
     }
 
 
+def _merge_review(a, b):
+    """Two copies of one review -> one: the copy with ratings wins, the other fills its gaps."""
+    base, other = (a, b) if (a["rating"] is not None or b["rating"] is None) else (b, a)
+    out = {k: (other[k] if v is None else v) for k, v in base.items()}
+    out["reviewer"] = {k: (other["reviewer"].get(k) if v is None else v) for k, v in base["reviewer"].items()}
+    return out
+
+
 def _reviews(block):
     block = block if isinstance(block, dict) else {}
+    # the site lists a featured review twice: a copy at the top without its ratings, and the
+    # original further down -> one entry per review id, at the first position
+    results, at = [], {}
+    for row in block.get("resultList") or []:
+        if not isinstance(row, dict):
+            continue
+        review = _review(row)
+        if review["id"] is not None and review["id"] in at:
+            results[at[review["id"]]] = _merge_review(results[at[review["id"]]], review)
+            continue
+        if review["id"] is not None:
+            at[review["id"]] = len(results)
+        results.append(review)
     return {"count": to_int(block.get("count")) or 0,
             "total_pages": to_int(block.get("pageCount")),
             "star_breakdown": {str(k): to_int(v) for k, v in (block.get("starWiseRatingMap") or {}).items()} or None,
-            "results": [_review(r) for r in (block.get("resultList") or []) if isinstance(r, dict)]}
+            "results": results}
 
 
 def _month_series(graph):
@@ -987,8 +1064,8 @@ def parse_project(html, psmid=None):
                   "currency": "INR" if min_price or max_price else None,
                   "display": clean(info.get("price")),
                   "per_sqft_min": rate_min, "per_sqft_max": rate_max},
-        "launched": iso_date(bean.get("launchDateStr")) or iso_date(bean.get("launchDate")),
-        "possession_by": iso_date(bean.get("possessionByDate")) or iso_date(bean.get("possdateStr")),
+        "launched": _month(bean.get("launchDateStr"), bean.get("launchDate")),
+        "possession_by": _month(bean.get("possessionByDate"), bean.get("possdateStr")),
         "total_units": to_int(bean.get("units")),
         "towers": to_int(bean.get("towers")),
         "floors": to_int(bean.get("numOfFloors")),
@@ -1021,7 +1098,7 @@ def parse_project(html, psmid=None):
                  "is_available": yn(data.get("isReraAvl"))},
         "approved_by_banks": [clean(b) for b in (bean.get("bankListMap") or {}).keys() if clean(b)]
                              if isinstance(bean.get("bankListMap"), dict) else [],
-        "certificates": {"commencement": clean(bean.get("ccObtained")), "occupancy": clean(bean.get("ocObtained"))},
+        "certificates": {"commencement": yn(bean.get("ccObtained")), "occupancy": yn(bean.get("ocObtained"))},
         "amenities": amenities,
         "unit_plans": _unit_plans(seo.get("pdpUnitPricing")),
         "gallery": {"photo_count": to_int(mobile.get("allImgCount")) or len(photos), "photos": photos,
@@ -1030,7 +1107,7 @@ def parse_project(html, psmid=None):
         "rating": to_float(ratings.get("psmAvgRt")),
         "review_count": to_int(ratings.get("totalReview")),
         "ratings": category_ratings or None,
-        "rank": {"in_locality": ((data.get("projectRank") or {}).get("data") or {}).get("rank") if isinstance(data.get("projectRank"), dict) else None,
+        "rank": {"in_locality": to_int(((data.get("projectRank") or {}).get("data") or {}).get("rank")) if isinstance(data.get("projectRank"), dict) else None,
                  "of": ((data.get("projectRank") or {}).get("data") or {}).get("total") if isinstance(data.get("projectRank"), dict) else None},
         "listings_for_sale": to_int(mobile.get("sellCountProperty")),
         "is_prelaunch": yn(data.get("isPrelaunch")),
@@ -1049,6 +1126,24 @@ def parse_project(html, psmid=None):
     }
 
 
+_TYPE_BY_TRENDS_CODE = {code: name for name, code in TRENDS_PROPERTY_TYPES.items()}
+
+
+def _unit_configurations(value):
+    """mUnitInfo '3 , 10002 , 1590 Sq-ft | 4 , 10002 , 1965 Sq-ft' (BHK, property-type
+    code, carpet area) -> [{bedrooms, property_type, carpet_area{value, unit}}]."""
+    out = []
+    for part in str(value or "").split("|"):
+        fields = [clean(f) for f in part.split(",")]
+        if len(fields) != 3 or not fields[2]:
+            continue
+        match = re.match(r"^([\d.]+)\s*(.*)$", fields[2])
+        out.append({"bedrooms": to_int(fields[0]),
+                    "property_type": _TYPE_BY_TRENDS_CODE.get(fields[1]),
+                    "carpet_area": _area(match.group(1), match.group(2)) if match else None})
+    return out
+
+
 def _doc_groups(items):
     """DocData.Data / reraData rows -> [{group, documents[{name, link}]}]."""
     out = []
@@ -1061,8 +1156,15 @@ def _doc_groups(items):
             continue
         if not isinstance(value, dict):
             continue
-        docs = [{"name": clean(name), "link": _RERA_IMG + str(path).lstrip("/") if clean(path) and not str(path).startswith("http") else clean(path)}
-                for name, path in value.items() if clean(path)]
+        docs, links = [], set()
+        for name, path in value.items():
+            if not clean(path):
+                continue
+            link = _RERA_IMG + str(path).lstrip("/") if not str(path).startswith("http") else clean(path)
+            if link in links:       # the site lists one PDF under several numbered names
+                continue
+            links.add(link)
+            docs.append({"name": clean(name), "link": link})
         out.append({"group": clean(item.get("dataKey")), "documents": docs})
     return out
 
@@ -1094,9 +1196,9 @@ def parse_rera(html, psmid=None):
         "has_quarterly_reports": yn(doc_data.get("QuarterReport")),
         "updated_on": iso_date(psm.get("reraUpDt")),
         "document_groups": groups,
-        "unit_configurations": clean(psm.get("mUnitInfo")),
+        "unit_configurations": _unit_configurations(psm.get("mUnitInfo")),
         "total_units": to_int(positive(psm.get("totalUnits"))),
-        "possession_by": iso_date(psm.get("prjPossDate")),
+        "possession_by": _month(psm.get("prjPossDate")),
     }
 
 
@@ -1108,6 +1210,20 @@ _STAT_KEYS = {"properties for sale": "sale_listings", "properties for rent": "re
 
 def _text(node):
     return " ".join(node.get_text(" ", strip=True).split()) if node is not None else None
+
+
+def settle_agent_cities(agents, searched_city=None):
+    """A card without a base locality reads 'Company, Mumbai', so parse_agents takes the
+    lone place for a locality. When that place is the city searched (or the city most
+    cards name), it is the agent's city -> city set, locality None. In place, returns agents."""
+    named = Counter(a["city"].lower() for a in agents if a.get("city"))
+    cities = {str(searched_city).lower()} if searched_city and not str(searched_city).isdigit() else set()
+    if named:
+        cities.add(named.most_common(1)[0][0])
+    for agent in agents:
+        if not agent.get("city") and (agent.get("locality") or "").lower() in cities:
+            agent["city"], agent["locality"] = agent["locality"], None
+    return agents
 
 
 def parse_agents(html):

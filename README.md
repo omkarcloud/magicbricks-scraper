@@ -32,7 +32,7 @@ Magicbricks Scraper is a **free and open-source** scraper that gets you **unlimi
   "rera_ids": ["P51900008345", "P51900008962"],
   "amenities": [
     { "id": "12205", "name": "Swimming Pool" },
-    { "id": null, "name": "Helipad" }
+    { "id": "12520", "name": "Helipad" }
   ],
   "lister": { "id": "27202575", "name": "Monica", "company": "M M Realty", "type": "Agent", "is_rera_agent": true, "sale_listings": 126, "rent_listings": 95 },
   "nearby_places": [

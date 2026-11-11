@@ -269,7 +269,7 @@ def test_parse_property_sale(sale):
     assert sale["project"]["id"] == "5336113" and sale["project"]["name"] == "Shelton Elite"
     assert sale["project"]["link"] == "https://www.magicbricks.com/shelton-elite-juhu-mumbai-pdpid-4d4235333336313133"
     assert sale["project"]["developer"] == "Shelton Groups" and sale["project"]["total_units"] == 31
-    assert sale["project"]["possession_by"] == "2027-03-01" and sale["project"]["launched"] == "2022-09"
+    assert sale["project"]["possession_by"] == "2027-03" and sale["project"]["launched"] == "2022-09"
     assert sale["project"]["brochure"].endswith("Shelton-Elite-Brochure.pdf")
     assert sale["project"]["rating"] == 4.7 and sale["project"]["ratings"]["water"] == 4.0
     assert sale["rera_ids"] == ["P51800046724"]
@@ -332,16 +332,130 @@ def test_parse_property_world_one_charges_and_facilities():
     assert price["booking_amount"] == 2500000 and price["brokerage"] == "1%"
     assert flat["floor"] == {"number": None, "total": 78, "units_on_floor": 2}
     assert flat["rera_authority_link"] == "https://maharera.mahaonline.gov.in/" and "rera_link" not in flat
-    ids = [a["id"] for a in flat["amenities"] if a["id"]]
-    assert len(ids) == len(set(ids)) == 58           # amenityMap (two ids share "Outdoor Tennis Courts")
-    extra = [a["name"].lower() for a in flat["amenities"] if not a["id"]]
-    assert len(extra) == len(set(extra)) == 42        # facilitiesDesc names not in amenityMap
-    assert not set(extra) & {a["name"].lower() for a in flat["amenities"] if a["id"]}
-    assert {"id": "12205", "name": "Swimming Pool"} in flat["amenities"]
-    assert {"id": None, "name": "Helipad"} in flat["amenities"]
+    # 58 amenityMap ids + 32 luxAmenities ids named by luxuryAmenitiesMap + 12 facilitiesDesc
+    # names matched to the one id the site's table gives them; every entry has an id and a name
+    ids = [a["id"] for a in flat["amenities"]]
+    assert len(ids) == len(set(ids)) == 102 and None not in ids
+    assert all(a["name"] for a in flat["amenities"])
+    assert {"id": "12205", "name": "Swimming Pool"} in flat["amenities"]       # amenityMap
+    assert {"id": "12520", "name": "Helipad"} in flat["amenities"]             # luxuryAmenitiesMap
+    assert {"id": "12544", "name": "Horticulture"} in flat["amenities"]        # facilitiesDesc + table
+    # two site ids share these names; both are kept
+    assert sorted(a["id"] for a in flat["amenities"] if a["name"] == "Concierge Services") == ["12239", "1404111"]
     assert flat["highlights"] == []
     assert flat["project"]["ratings"]["construction_quality"] == 4.5
     assert all(k == k.lower() for k in flat["project"]["ratings"])
+
+
+def test_reviews_featured_copy_merged():
+    """The site repeats a featured review at the top of the list without its ratings
+    (Lodha World One, 2026-11-10): one entry per id, at the first position, ratings kept."""
+    featured = {"reviewId": "1664677", "reviewTitle": "Iconic Sea View Apartments", "reviewDescription": "Lodha",
+                "userType": "Owner", "userRelation": "Lives in Project", "postedOn": "03/02/2026",
+                "reviewedOn": "27/10/2026", "isSponsered": "false"}
+    other = {"reviewId": "1261879", "reviewTitle": "Nice project.", "userName": "Edal Jhaveri", "userType": "Agent",
+             "postedOn": "19/03/2024", "reviewedOn": "19/03/2024"}
+    original = dict(featured, overAllRating=5, reviewedOn="03/02/2026",
+                    categoryRatingMap={"Project Infrastructure": {"Water Supply": 4}})
+    out = P._reviews({"count": 3, "pageCount": 1, "resultList": [featured, other, original]})
+    assert [r["id"] for r in out["results"]] == ["1664677", "1261879"]
+    first = out["results"][0]
+    assert first["rating"] == 5.0 and first["reviewed_on"] == "2026-02-03"
+    assert first["category_ratings"] == {"project_infrastructure": {"water_supply": 4.0}}
+    assert first["reviewer"]["relation"] == "Lives in Project"
+    assert out["count"] == 3                     # the site's own count
+    shelton = P.parse_project(fixture("project_shelton_elite.html"))
+    for key in ("reviews", "locality_reviews"):
+        ids = [r["id"] for r in shelton[key]["results"]]
+        assert len(ids) == len(set(ids)), key
+
+
+def test_rent_booking_field_is_the_deposit():
+    """A rental's 'booking amount' is its security deposit (the rent page labels the same
+    figure 'Security Deposit'): rent rows carry it as security_deposit, sale rows as booking_amount."""
+    rent = P.parse_search(fixture("search_rent_bangalore.json"))["results"]
+    with_deposit = [r for r in rent if r["price"]["security_deposit"]]
+    assert with_deposit and all(r["price"]["booking_amount"] is None for r in rent)
+    assert with_deposit[0]["price"]["security_deposit"] == 2000000 and with_deposit[0]["price"]["amount"] == 250000
+    sale = P.parse_search(fixture("search_sale_juhu_3bhk.json"))["results"]
+    assert any(r["price"]["booking_amount"] for r in sale)
+    assert all(r["price"]["security_deposit"] is None for r in sale)
+    assert P._booking_or_deposit("rent", None, "0", "24,00,000") == {"booking_amount": None, "security_deposit": 2400000}
+    assert P._booking_or_deposit("sale", "2500000") == {"booking_amount": 2500000, "security_deposit": None}
+
+
+def test_month_dates_and_placeholder_rank():
+    """Launch / possession dates are months on the site; the day is a filler 01."""
+    assert P._month("Jun, 2021") == "2021-06" and P._month("20180601") == "2018-06"
+    assert P._month("2022-12-01 00:00:00") == "2022-12" and P._month(None, "Jun 2018") == "2018-06"
+    assert P._month("soon") is None
+    assert P.to_int("Not Found") is None          # projectRank.data.rank when unranked
+
+
+def test_project_card_price_range():
+    assert P._range_display("60.6 Lac,1.20 Cr") == "60.6 Lac - 1.20 Cr"
+    assert P._range_display("10.51 Cr,18.57 Cr") == "10.51 Cr - 18.57 Cr"
+    assert P._range_display("Call For Price") == "Call For Price" and P._range_display(None) is None
+    cards = P.parse_projects_list(fixture("projects_mumbai_page1.html"))["results"]
+    assert all("," not in c["price"]["display"] for c in cards if c["price"]["display"])
+
+
+def test_rera_units_and_repeated_documents():
+    out = P.parse_rera(fixture("rera_shelton_elite.html"), "5336113")
+    assert out["unit_configurations"][0] == {"bedrooms": 1, "property_type": "apartment",
+                                             "carpet_area": {"value": 733.0, "unit": "sqft"}}
+    assert len(out["unit_configurations"]) == 7
+    # Lodha World One lists one PDF as Occupancy Certificate1/2/3 -> once
+    groups = P._doc_groups([{"dataKey": "Legal Certificates", "dataValue": {
+        "Occupancy Certificate1": "2025/07/05/oc.pdf", "Occupancy Certificate2": "2025/07/05/oc.pdf",
+        "Commencement Certificate1": "2025/07/05/cc.pdf"}}])
+    assert [d["name"] for d in groups[0]["documents"]] == ["Occupancy Certificate1", "Commencement Certificate1"]
+
+
+def test_unit_plan_rents_are_numbers():
+    plans = P._unit_plans({"All": [{"bhkType": "3 BHK", "carpetAr": "1590", "coverAreaUnitD": "Sq-ft",
+                                    "minRentPriceD": "420000", "maxRentPriceD": "615000"},
+                                   {"bhkType": "4 BHK", "carpetAr": "1965", "minRentPriceD": None}]})
+    assert plans[0]["rent_price"] == {"min": 420000, "max": 615000}
+    assert plans[1]["rent_price"] is None
+
+
+def test_agent_lone_place_is_the_city():
+    """'Tejasvi Realty Pvt. Ltd., Mumbai' (no base locality) -> city Mumbai, locality None."""
+    agents = [{"locality": "Andheri West", "city": "Mumbai"}, {"locality": "Chembur", "city": "Mumbai"},
+              {"locality": "Mumbai", "city": None}, {"locality": "Thane West", "city": None}]
+    P.settle_agent_cities(agents, "4320")                    # a code: the cards' own city decides
+    assert agents[2] == {"locality": None, "city": "Mumbai"}
+    assert agents[3] == {"locality": "Thane West", "city": None}
+    lone = [{"locality": "Bangalore", "city": None}]
+    assert P.settle_agent_cities(lone, "bangalore") == [{"locality": None, "city": "Bangalore"}]
+    cards = P.settle_agent_cities(P.parse_agents(fixture("agents_mumbai_sale.html")), "Mumbai")
+    assert not [c for c in cards if c["locality"] == "Mumbai"]
+
+
+def test_facing_spacing():
+    assert P._facing("North - East") == "North-East"
+    assert P._facing("South -West") == "South-West"
+    assert P._facing("East") == "East" and P._facing(None) is None
+
+
+def test_strip_html_decodes_entities():
+    """Project descriptions carry &nbsp; / &amp; inside their HTML (Lodha World One, 2026-11-10)."""
+    text = P._strip_html("<p>Near the Sea Link.&nbsp;</p><h2>Key Facts &amp; USPs</h2>"
+                         "<table><tr><td>Feature</td><td>Details</td></tr></table>")
+    assert text == "Near the Sea Link. | Key Facts & USPs | Feature: Details"
+    assert P._strip_html("Pei Cobb Freed &amp; Partners") == "Pei Cobb Freed & Partners"
+
+
+def test_search_amenities_all_named():
+    """Search rows carry bare amenity ids (luxAmenMap / nonluxAmenMap name a few);
+    the site's id table names the rest, so no row ships a null name."""
+    for name in ("search_sale_juhu_3bhk.json", "search_rent_bangalore.json", "search_commercial_mumbai.json"):
+        rows = P.parse_search(fixture(name))["results"]
+        amenities = [a for row in rows for a in row["amenities"]]
+        assert amenities and all(a["id"] and a["name"] for a in amenities), name
+    assert refs.AMENITIES["12226"] == "Cafeteria/Food Court"
+    assert refs.AMENITIES["1404161"] == "Kids Splash Pool"
 
 
 def test_maintenance_frequency():
@@ -395,7 +509,7 @@ def test_parse_project(project):
     assert project["bedrooms"] == [3, 4]
     assert project["price"] == {"min": 54148000, "max": 106368000, "currency": "INR",
                                 "display": "5.41 Cr - 10.63 Cr", "per_sqft_min": 40000.0, "per_sqft_max": 60284.0}
-    assert project["launched"] == "2022-09-01" and project["possession_by"] == "2027-03"
+    assert project["launched"] == "2022-09" and project["possession_by"] == "2027-03"   # months, like the site
     assert project["total_units"] == 31 and project["towers"] == 1
     assert project["area"] == {"value": 1.0, "unit": "acre"}
     assert project["location"]["address"].startswith("Gulmohar Cross Road No. 12")
@@ -409,7 +523,7 @@ def test_parse_project(project):
     assert project["rera"]["link"] == "https://www.magicbricks.com/shelton-elite-rera-details-nprid-4d4235333336313133"
     assert project["rera"]["updated_on"] == "2024-08-01"
     assert project["approved_by_banks"] == ["Canara Bank"]
-    assert project["certificates"] == {"commencement": "Yes", "occupancy": None}
+    assert project["certificates"] == {"commencement": True, "occupancy": None}
     assert {"id": "12202", "name": "Lift", "icon": "https://cdn.staticmb.com/mobileImages/amenities/lift.jpg"} in project["amenities"]
     assert len(project["amenities"]) == 18
     assert project["unit_plans"][0]["configuration"] == "3 BHK"
@@ -436,11 +550,13 @@ def test_parse_project(project):
     pincode_faq = next(f for f in project["faqs"] if f["question"] == "What is the area pin code of Shelton Elite?")
     assert "400049" in pincode_faq["answer"]
     assert all(f["question"] and f["answer"] and "<" not in f["answer"] for f in project["faqs"])
-    assert project["reviews"]["count"] == 3 and len(project["reviews"]["results"]) == 3
+    # the site's count includes the featured copy of 1675659; the list keeps it once, with its ratings
+    assert project["reviews"]["count"] == 3 and len(project["reviews"]["results"]) == 2
     review = project["reviews"]["results"][0]
     assert review["id"] == "1675659" and review["title"] == "Prime Juhu Living with Exclusive Comforts"
     assert review["reviewer"] == {"name": None, "type": "Owner", "relation": "Lives in Project", "photo": None}
     assert review["posted_on"] == "2026-02-09" and review["is_sponsored"] is False
+    assert review["rating"] is not None and review["reviewed_on"] == "2026-02-09"
     assert project["locality_reviews"]["count"] == 116
     assert project["similar_projects"][0]["id"] == "5441461"
     assert project["similar_projects"][0]["price"]["min"] == 90000000
@@ -466,10 +582,10 @@ def test_parse_projects_list():
     assert card["developer"]["name"] == "Liberty Group" and card["developer"]["id"] == "55322"
     assert card["bedrooms"] == [1, 2, 3]
     assert card["price"]["min"] == 11500000 and card["price"]["max"] == 34000000
-    assert card["price"]["display"] == "1.15 Cr,3.40 Cr"
+    assert card["price"]["display"] == "1.15 Cr - 3.40 Cr"
     assert card["price"]["per_sqft_min"] == 15885.0 and card["price"]["per_sqft_max"] == 27200.0
     assert card["status"] == "Ready To Move"
-    assert card["launched"] == "2017-08-01" and card["possession_by"] == "2025-12-01"
+    assert card["launched"] == "2017-08" and card["possession_by"] == "2025-12"
     assert card["total_units"] == 138 and card["towers"] == 1
     assert card["area"] == {"value": 1.0, "unit": "acre"}
     assert card["location"]["locality"] == {"id": "80084", "name": "Malad West"}
@@ -505,7 +621,7 @@ def test_parse_rera():
     assert legal[0]["name"] == "Legal Title Report"
     assert legal[0]["link"] == "https://img.staticmb.com/mbimages/reradoc/2024/08/01/53361131Copyofthelegaltitlereport_2_1.pdf"
     assert len(legal) == 12
-    assert out["total_units"] == 31 and out["possession_by"] == "2027-03-01"
+    assert out["total_units"] == 31 and out["possession_by"] == "2027-03"
     assert P.parse_rera("<html></html>", "1")["document_groups"] == []
 
 

@@ -19,7 +19,10 @@ The property-type slugs, sort tokens, furnishing / possession codes and the
 trends property-type codes are the site's own (verified against
 /mbsrp/propertySearch.html result counts on 2026-11-07); the amenity and
 landmark-category tables are the id -> name pairs the site embeds in its
-pages (union over the captured fixtures).
+pages (union over the captured fixtures plus three listing pages fetched
+2026-11-10: amenityMap, luxuryAmenitiesList, luxuryAmenitiesMap and the
+search rows' luxAmenMap / nonluxAmenMap). Search rows carry bare ids, so
+this table is what names them.
 """
 import re
 from urllib.parse import urlparse
@@ -222,22 +225,58 @@ AMENITIES = {
     "12201": "Power Back Up", "12202": "Lift", "12203": "Rain Water Harvesting",
     "12204": "Club House", "12205": "Swimming Pool", "12206": "Gymnasium", "12207": "Park",
     "12208": "Reserved Parking", "12209": "Security", "12211": "Water Storage",
+    "12212": "Private Terrace/Garden", "12213": "Vaastu Compliant",
     "12214": "Service/Goods Lift", "12215": "Air Conditioned", "12216": "Visitor Parking",
     "12217": "Intercom Facility", "12218": "Maintenance Staff", "12219": "Waste Disposal",
     "12220": "Laundry Service", "12221": "Internet/Wi-Fi Connectivity",
     "12222": "DTH Television Facility", "12223": "RO Water System", "12224": "Banquet Hall",
-    "12225": "Bar/Lounge", "12227": "Conference Room", "12228": "Piped Gas",
-    "12229": "Jogging and Strolling Track", "12230": "Outdoor Tennis Courts",
-    "12234": "Skyline View", "12513": "Marble flooring", "12521": "Private pool",
-    "12522": "Private jaccuzi", "12523": "Mini Cinema Theatre",
+    "12225": "Bar/Lounge", "12226": "Cafeteria/Food Court", "12227": "Conference Room",
+    "12228": "Piped Gas", "12229": "Jogging and Strolling Track",
+    "12230": "Outdoor Tennis Courts", "12231": "Farm-House", "12232": "Mansion",
+    "12233": "Downtown", "12234": "Skyline View", "12235": "Wrap Around Balcony",
+    "12236": "Island Kitchen Layout", "12237": "Full Glass Wall",
+    "12238": "House help accommodation", "12239": "Concierge Services", "12511": "Garden View",
+    "12512": "Aesthetic Interior", "12513": "Marble flooring", "12514": "Bathtub",
+    "12515": "Well Furnished", "12518": "Modular Kitchen", "12520": "Helipad",
+    "12521": "Private pool", "12522": "Private jaccuzi", "12523": "Mini Cinema Theatre",
+    "12524": "Golf Course", "12525": "Infinity Swimming Pool",
     "12526": "Pool with temperature control", "12527": "Sea facing", "12528": "Skydeck",
-    "12529": "High Ceiling", "12532": "Theme based Architectures", "12535": "Large Clubhouse",
-    "12537": "Large Open space", "12539": "Grand Entrance lobby",
-    "12540": "Premium branded fittings", "12541": "AC in each room", "12543": "Multipurpose Hall",
-    "12547": "CCTV Camera", "12548": "Fire Sprinklers", "12556": "Fireplace", "12558": "Sky Villa",
-    "12560": "Water Front", "12561": "Hilltop", "12562": "Smart Home", "12581": "Kids play area",
-    "1404110": "Bank & ATM", "1404117": "Indoor Games Room", "1404120": "Kids Club",
-    "1404146": "Sewage treatment plant",
+    "12529": "High Ceiling", "12530": "Earth quake resistant", "12531": "Central AC",
+    "12532": "Theme based Architectures", "12533": "Health club with Steam / Jaccuzi",
+    "12534": "Located in the Heart of city", "12535": "Large Clubhouse",
+    "12536": "3 Tier Security System", "12537": "Large Open space",
+    "12538": "Fingerprint Access", "12539": "Grand Entrance lobby",
+    "12540": "Premium branded fittings", "12541": "AC in each room",
+    "12542": "All wooden flooring", "12543": "Multipurpose Hall", "12544": "Horticulture",
+    "12545": "Solar Energy", "12546": "Guest lobby in each floor", "12547": "CCTV Camera",
+    "12548": "Fire Sprinklers", "12549": "Entry Exit Gate", "12550": "Projector",
+    "12551": "Tea/Coffee", "12552": "Printer", "12553": "Whiteboard",
+    "12554": "Wheelchair Accessibility", "12555": "Private Garage", "12556": "Fireplace",
+    "12557": "Wine Cellar", "12558": "Sky Villa", "12559": "Town House", "12560": "Water Front",
+    "12561": "Hilltop", "12562": "Smart Home", "12577": "Barbeque space", "12578": "Art center",
+    "12579": "Pet park", "12580": "Private Garden", "12581": "Kids play area",
+    "12583": "Library", "12584": "Shopping center", "12585": "Curated Garden",
+    "12586": "Cycling track", "12587": "Walk-in closet", "1404105": "AEROBICS ROOM",
+    "1404106": "Arts & Craft Studio", "1404107": "Barbeque Pit", "1404108": "Canopy Walk",
+    "1404109": "Coffee Lounge & Restaurants", "1404110": "Bank & ATM",
+    "1404111": "Concierge Services", "1404112": "Dance Studio",
+    "1404113": "Early Learning Centre", "1404114": "Event Space & Amphitheatre",
+    "1404115": "Flower Gardens", "1404116": "Guest Accommodation",
+    "1404117": "Indoor Games Room", "1404118": "Indoor Squash & Badminton Courts",
+    "1404120": "Kids Club", "1404121": "Kids Play Area",
+    "1404122": "Kids Play Pool With Water Slides", "1404123": "Library And Business Centre",
+    "1404124": "Meditation Area", "1404125": "Multipurpose Courts",
+    "1404126": "Outdoor Tennis Courts", "1404127": "Recreational Pool",
+    "1404128": "Rentable Community Space", "1404129": "Retail Boulevard (Retail Shops)",
+    "1404130": "Activity Deck4", "1404131": "Cycling & Jogging Track",
+    "1404143": "Fire Fighting Equipment", "1404146": "Sewage treatment plant",
+    "1404147": "Water treatment plant", "1404148": "Volleyball court",
+    "1404149": "Half basketball court", "1404150": "Cricket net practice",
+    "1404151": "Community entrance gate", "1404152": "Aesthetically designed landscape garden",
+    "1404153": "Tot-lot surrounding", "1404154": "Lawn with pathway",
+    "1404155": "Badminton court", "1404156": "Sand pit", "1404157": "Community Hall",
+    "1404158": "Provision for power backup", "1404159": "Waste water recycling",
+    "1404160": "Ground water recharging", "1404161": "Kids Splash Pool",
 }
 
 LANDMARK_CATEGORIES = {

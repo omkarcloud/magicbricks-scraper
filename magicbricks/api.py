@@ -304,7 +304,7 @@ def _agents_search(city, locality, listing_type):
     locality_id = _locality_id(locality, city) if locality else None
     city_code = _city_code(city) if city and not locality_id else None
     html = fetch_agents(listing_type, city=city_code, locality=locality_id)
-    results = parsers.parse_agents(html)
+    results = parsers.settle_agent_cities(parsers.parse_agents(html), city)
     return {
         "city": city,
         "locality": {"id": locality_id, "name": None if is_numeric_id(locality) else locality} if locality else None,
