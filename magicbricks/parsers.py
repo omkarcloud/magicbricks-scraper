@@ -44,6 +44,7 @@ from magicbricks.refs import (
     AMENITIES, LANDMARK_CATEGORIES, SITE, TRENDS_PROPERTY_TYPES, agent_link, decode_id, project_link,
     property_link, rera_link, site_link,
 )
+from scraper_utils.values import first_int as to_int
 
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
@@ -64,21 +65,6 @@ def clean(value):
         return value
     text = " ".join(str(value).split())
     return None if text.lower() in _MASKS else text
-
-
-def to_int(value):
-    value = clean(value)
-    if value is None or value is False or value is True:
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    match = _NUMBER_RE.search(value)
-    if not match:
-        return None
-    try:
-        return int(float(match.group(0).replace(",", "")))
-    except ValueError:
-        return None
 
 
 def to_float(value):

@@ -54,6 +54,7 @@ import config
 import egress
 from scraper_errors import BadRequest, Blocked, NotFound, UpstreamError
 from magicbricks.refs import SITE, encode_id, projects_list_path
+from scraper_utils import retry, sessions as sessions_utils
 
 IMPERSONATE = "chrome"
 PAGE_TIMEOUT = 40      # property pages are ~2.6 MB
@@ -136,11 +137,7 @@ def _drop_session(blocked=False):
     tier = _tier()
     sessions = getattr(_local, "sessions", None) or {}
     sess = sessions.pop(tier, None)
-    if sess is not None:
-        try:
-            sess.close()
-        except Exception:
-            pass
+    sessions_utils.close_quietly(sess)
     if blocked and tier == "primary" and config.MAGICBRICKS_BLOCK_HOLD_S:
         _local.block_until = time.monotonic() + config.MAGICBRICKS_BLOCK_HOLD_S
 
@@ -151,16 +148,7 @@ def _retrying(fn):
     drops the session so the retry rides a fresh exit; a block (or a 5xx,
     which the own IP draws on some pages that residential serves) also
     moves the thread to the fallback exit."""
-    last = None
-    for attempt in range(1, config.MAX_RETRIES + 1):
-        try:
-            return fn()
-        except MagicbricksUpstreamError as e:
-            last = e
-            _drop_session(blocked=True)
-            if attempt < config.MAX_RETRIES:
-                time.sleep(config.RETRY_BACKOFF * attempt)
-    raise last
+    return retry.run(fn, config, MagicbricksUpstreamError, lambda e: _drop_session(blocked=True))
 
 
 def _page_title(text):
